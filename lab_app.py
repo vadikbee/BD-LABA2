@@ -8,6 +8,7 @@ from sklearn.metrics import mean_absolute_error
 import matplotlib.pyplot as plt
 import matplotlib
 import base64
+import io  # <-- Добавлен необходимый импорт
 
 # --- Конфигурация страницы и тема "Ночная сакура" ---
 
@@ -139,11 +140,26 @@ def preprocess_data(df, is_train=True):
 
     # Для валидационного набора убедимся, что все колонки из трейна присутствуют
     if not is_train:
-        train_cols = st.session_state.get('train_columns', [])
-        missing_cols = set(train_cols) - set(df_processed.columns)
-        for c in missing_cols:
-            df_processed[c] = 0
-        df_processed = df_processed[train_cols]
+        # Убедимся, что train_columns сохранены в session_state
+        if 'train_columns' in st.session_state:
+            train_cols = st.session_state.get('train_columns', [])
+            # Уберем целевую переменную, если она случайно попала в список колонок
+            if 'Price' in train_cols:
+                train_cols.remove('Price')
+
+            current_cols = df_processed.columns.tolist()
+            missing_cols = set(train_cols) - set(current_cols)
+            for c in missing_cols:
+                df_processed[c] = 0
+
+            extra_cols = set(current_cols) - set(train_cols)
+            df_processed = df_processed.drop(columns=list(extra_cols))
+
+            df_processed = df_processed[train_cols]
+        else:
+            st.error(
+                "Колонки для обучения не были сохранены. Пожалуйста, сначала перейдите в раздел 'Обработка и обучение'.")
+            return None
 
     return df_processed
 
@@ -194,7 +210,13 @@ if df_train_raw is not None and df_valid_raw is not None:
         st.write(df_train_raw.describe())
 
         st.subheader("Информация о типах данных и пропусках:")
-        st.image("image_1f76ef.jpg", caption="Пример содержимого CSV файла")
+
+        # --- ИСПРАВЛЕНИЕ ОШИБКИ ---
+        # Вместо отображения статичного файла, динамически выводим информацию о DataFrame
+        buffer = io.StringIO()
+        df_train_raw.info(buf=buffer)
+        s = buffer.getvalue()
+        st.text(s)
 
 
     # --- РАЗДЕЛ 2: Обработка и обучение ---
@@ -228,7 +250,13 @@ if df_train_raw is not None and df_valid_raw is not None:
         st.pyplot(fig)
 
         st.subheader("2.2. Предобработка и кодирование")
-        df_processed = preprocess_data(df_train_filtered, is_train=True)
+        # Создаем копию для предобработки, чтобы не изменять df_train_filtered
+        df_train_to_process = df_train_filtered.drop('Price', axis=1)
+        df_processed = preprocess_data(df_train_to_process, is_train=True)
+
+        # Объединяем обработанные признаки с целевой переменной
+        df_processed['Price'] = df_train_filtered['Price']
+
         st.write("Данные после обработки (заполнение пропусков, факторизация и One-Hot кодирование):")
         st.dataframe(df_processed.head())
 
@@ -243,6 +271,8 @@ if df_train_raw is not None and df_valid_raw is not None:
 
         st.subheader("2.3. Обучение моделей и оценка")
         models = train_models(X_train, y_train)
+        st.session_state['models'] = models  # Сохраняем модели для других разделов
+        st.session_state['data_filtered'] = True  # Флаг, что данные были обработаны
 
         st.write("Оценка моделей на тестовой выборке (Mean Absolute Error):")
 
@@ -256,7 +286,7 @@ if df_train_raw is not None and df_valid_raw is not None:
             else:
                 col2.metric(label=name, value=f"{mae:,.0f} руб.")
 
-        best_model_name = "Random Forest"  # Основываясь на результатах методички
+        best_model_name = "Random Forest"
         best_model = models[best_model_name]
 
         st.subheader(f"2.4. Анализ лучшей модели: {best_model_name}")
@@ -268,104 +298,93 @@ if df_train_raw is not None and df_valid_raw is not None:
         ax.set_title('Соответствие предсказаний и реальных цен')
         st.pyplot(fig)
 
-        # Новый код (правильный)
         st.subheader("2.5. Итоговая оценка на валидационных данных")
         df_valid_filtered = df_valid_raw[(df_valid_raw['Price'] > min_price) & (df_valid_raw['Price'] < max_price)]
 
-        # 1. Сначала отделяем целевую переменную Y от отфильтрованных данных
         y_valid = df_valid_filtered['Price']
-        # 2. Отделяем признаки X
         X_valid_raw = df_valid_filtered.drop('Price', axis=1)
-        # 3. Обрабатываем только признаки
         X_valid = preprocess_data(X_valid_raw, is_train=False)
 
-        valid_pred = best_model.predict(X_valid)
-        valid_mae = mean_absolute_error(y_valid, valid_pred)
-        st.metric(label=f"MAE на валидационном наборе ({best_model_name})", value=f"{valid_mae:,.0f} руб.")
-        st.info("Это финальная оценка качества модели на данных, которые она не видела во время обучения.")
+        if X_valid is not None:
+            valid_pred = best_model.predict(X_valid)
+            valid_mae = mean_absolute_error(y_valid, valid_pred)
+            st.metric(label=f"MAE на валидационном наборе ({best_model_name})", value=f"{valid_mae:,.0f} руб.")
+            st.info("Это финальная оценка качества модели на данных, которые она не видела во время обучения.")
 
 
     # --- РАЗДЕЛ 3: Прогнозирование ---
     elif app_mode == "Прогнозирование цены":
         st.header("3. Сделать прогноз")
-        st.write("Введите параметры квартиры, чтобы получить предсказание от лучшей модели (Random Forest).")
 
-        # Загрузка лучшей модели (обучим на всех отфильтрованных данных для лучшего прогноза)
-        df_filtered_all = preprocess_data(df_train_filtered, is_train=True)
-        X_all = df_filtered_all.drop('Price', axis=1)
-        y_all = df_filtered_all['Price']
+        # Проверка, были ли модели обучены
+        if 'models' not in st.session_state or not st.session_state.get('data_filtered'):
+            st.warning(
+                "Пожалуйста, сначала перейдите в раздел 'Обработка и обучение', чтобы подготовить данные и обучить модели.")
+        else:
+            st.write("Введите параметры квартиры, чтобы получить предсказание от лучшей модели (Random Forest).")
 
+            final_model = st.session_state['models']["Random Forest"]
 
-        @st.cache_resource
-        def train_final_model(X, y):
-            rf_final = RandomForestRegressor(n_estimators=100, random_state=42, n_jobs=-1)
-            rf_final.fit(X, y)
-            return rf_final
+            # Собираем данные от пользователя
+            st.sidebar.subheader("Параметры квартиры:")
 
+            apartment_types = df_train_raw['Apartment type'].unique()
+            renovations = df_train_raw['Renovation'].unique()
+            regions = df_train_raw['Region'].unique()
+            metro_stations = df_train_raw['Metro station'].unique()
 
-        final_model = train_final_model(X_all, y_all)
+            # Виджеты для ввода
+            num_rooms = st.sidebar.slider("Количество комнат", 1, 6, 2)
+            area = st.sidebar.slider("Общая площадь, м²", 20.0, 200.0, 55.0)
+            living_area = st.sidebar.slider("Жилая площадь, м²", 10.0, 150.0, 35.0)
+            kitchen_area = st.sidebar.slider("Площадь кухни, м²", 5.0, 50.0, 10.0)
+            floor = st.sidebar.slider("Этаж", 1, 50, 5)
+            num_floors = st.sidebar.slider("Всего этажей в доме", 1, 50, 12)
+            minutes_to_metro = st.sidebar.slider("Минут до метро", 1, 60, 15)
 
-        # Собираем данные от пользователя
-        st.sidebar.subheader("Параметры квартиры:")
+            apartment_type = st.sidebar.selectbox("Тип апартаментов", apartment_types)
+            renovation = st.sidebar.selectbox("Ремонт", renovations)
+            region = st.sidebar.selectbox("Район", regions)
+            metro_station = st.sidebar.selectbox("Станция метро", metro_stations)
 
-        # Получаем уникальные значения из исходного датафрейма для селекторов
-        apartment_types = df_train_raw['Apartment type'].unique()
-        renovations = df_train_raw['Renovation'].unique()
-        regions = df_train_raw['Region'].unique()
-        metro_stations = df_train_raw['Metro station'].unique()
+            if st.sidebar.button("Предсказать стоимость"):
+                # --- УЛУЧШЕНИЕ: Использование pd.concat вместо устаревшего .append() ---
+                input_data = {
+                    'Minutes to metro': [minutes_to_metro], 'Number of rooms': [num_rooms],
+                    'Area': [area], 'Living area': [living_area], 'Kitchen area': [kitchen_area],
+                    'Floor': [floor], 'Number of floors': [num_floors],
+                    'Metro station': [metro_station], 'Region': [region],
+                    'Apartment type': [apartment_type], 'Renovation': [renovation]
+                }
+                input_df = pd.DataFrame(input_data)
 
-        # Виджеты для ввода
-        num_rooms = st.sidebar.slider("Количество комнат", 1, 6, 2)
-        area = st.sidebar.slider("Общая площадь, м²", 20.0, 200.0, 55.0)
-        living_area = st.sidebar.slider("Жилая площадь, м²", 10.0, 150.0, 35.0)
-        kitchen_area = st.sidebar.slider("Площадь кухни, м²", 5.0, 50.0, 10.0)
-        floor = st.sidebar.slider("Этаж", 1, 50, 5)
-        num_floors = st.sidebar.slider("Всего этажей в доме", 1, 50, 12)
-        minutes_to_metro = st.sidebar.slider("Минут до метро", 1, 60, 15)
+                # Копия исходных данных для факторизации, чтобы не изменять df_train_raw
+                temp_factorize_metro = pd.concat([df_train_raw['Metro station'], input_df['Metro station']],
+                                                 ignore_index=True)
+                temp_factorize_region = pd.concat([df_train_raw['Region'], input_df['Region']], ignore_index=True)
 
-        apartment_type = st.sidebar.selectbox("Тип апартаментов", apartment_types)
-        renovation = st.sidebar.selectbox("Ремонт", renovations)
-        region = st.sidebar.selectbox("Район", regions)
-        metro_station = st.sidebar.selectbox("Станция метро", metro_stations)
+                input_df['Metro station'] = pd.factorize(temp_factorize_metro)[0][-1]
+                input_df['Region'] = pd.factorize(temp_factorize_region)[0][-1]
 
-        # Кнопка для прогноза
-        if st.sidebar.button("Предсказать стоимость"):
-            # Создание DataFrame из пользовательских данных
-            input_data = {
-                'Minutes to metro': [minutes_to_metro],
-                'Number of rooms': [num_rooms],
-                'Area': [area],
-                'Living area': [living_area],
-                'Kitchen area': [kitchen_area],
-                'Floor': [floor],
-                'Number of floors': [num_floors],
-                'Metro station': [metro_station],
-                'Region': [region],
-                'Apartment type': [apartment_type],
-                'Renovation': [renovation]
-            }
-            input_df = pd.DataFrame(input_data)
+                # One-Hot Encoding
+                input_df = pd.get_dummies(input_df, columns=['Apartment type', 'Renovation'])
 
-            # Предобработка пользовательских данных
-            # Факторизация
-            input_df['Metro station'] = \
-            pd.factorize(df_train_raw['Metro station'].append(input_df['Metro station'], ignore_index=True))[0][-1]
-            input_df['Region'] = pd.factorize(df_train_raw['Region'].append(input_df['Region'], ignore_index=True))[0][
-                -1]
+                # Обеспечение правильного порядка и наличия всех колонок
+                if 'train_columns' in st.session_state:
+                    train_cols = st.session_state['train_columns']
 
-            # One-Hot Encoding
-            for col_val in [f'Apartment type_{t}' for t in apartment_types]:
-                input_df[col_val] = 1 if col_val == f'Apartment type_{apartment_type}' else 0
-            for col_val in [f'Renovation_{r}' for r in renovations]:
-                input_df[col_val] = 1 if col_val == f'Renovation_{renovation}' else 0
+                    # Удаляем Price, если он есть
+                    if 'Price' in train_cols:
+                        train_cols.remove('Price')
 
-            input_df = input_df.drop(['Apartment type', 'Renovation'], axis=1)
+                    # Добавляем недостающие колонки
+                    for col in set(train_cols) - set(input_df.columns):
+                        input_df[col] = 0
 
-            # Обеспечение правильного порядка столбцов
-            train_cols = st.session_state.get('train_columns', [])
-            input_df = input_df.reindex(columns=train_cols, fill_value=0)
+                    # Удаляем лишние колонки и устанавливаем правильный порядок
+                    input_df = input_df[train_cols]
 
-            # Прогноз
-            prediction = final_model.predict(input_df)[0]
-
-            st.success(f"## Предсказанная стоимость: **{prediction:,.0f} руб.**")
+                    prediction = final_model.predict(input_df)[0]
+                    st.success(f"## Предсказанная стоимость: **{prediction:,.0f} руб.**")
+                else:
+                    st.error("Ошибка: не найдены колонки для обучения. Вернитесь на предыдущий шаг.")
