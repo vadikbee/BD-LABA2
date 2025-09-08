@@ -5,7 +5,7 @@ import xgboost as xgb
 from sklearn.model_selection import train_test_split
 from sklearn.ensemble import RandomForestRegressor
 from sklearn.metrics import mean_absolute_error
-from sklearn.preprocessing import OrdinalEncoder, OneHotEncoder # <-- Добавлены новые импорты
+from sklearn.preprocessing import OrdinalEncoder, OneHotEncoder 
 import matplotlib.pyplot as plt
 import matplotlib
 import base64
@@ -383,7 +383,7 @@ if df_train_raw is not None and df_valid_raw is not None:
                 }
                 input_df = pd.DataFrame(input_data)
                 
-                # ИСПРАВЛЕНИЕ: Используем новую, надежную функцию обработки
+                
                 processed_input = preprocess_data_new(input_df)
 
                 if processed_input is not None:
